@@ -5,8 +5,6 @@ Created on Sat May 16 20:47:27 2015
 @author: merlz
 """
 import numpy
-import scipy.sparse
-
 
 #ranges all given in cm
 SonarSensor = {"spread": 15.*numpy.pi/180., "range": 500., "phitfree": -0.2, "phitoccupied": 3.5}
@@ -52,7 +50,7 @@ def BresenhamBorder(A,B):
     result = []
     xval = A[0]
     slope = A-B
-    slope = slope[0]/float(slope[1])
+    slope = slope[0]/float(slope[1]+0.000000001)
     for i in xrange(A[1],B[1]+1):
         result.append((int(numpy.round(xval)),i))
         xval += slope
@@ -60,6 +58,27 @@ def BresenhamBorder(A,B):
         result = result[::-1]
     return result
 
+class BlockSparseMatrix:
+    
+    def __init__(self,blocksize=(500,500),dtype=numpy.float32):
+        self.blocksize=blocksize
+        self.dtype=dtype
+        self.blocks = {}
+    
+    def __getitem__(self, key):
+        k = (int(key[0]/self.blocksize[0]),int(key[1]/self.blocksize[1]))
+        if not (k in self.blocks):
+            return 0
+        else:
+            k2 = (int(key[0]%self.blocksize[0]),int(key[1]%self.blocksize[1]))
+            return self.blocks[k][k2]
+    
+    def __setitem__(self, key, item):
+        k = (int(key[0]/self.blocksize[0]),int(key[1]/self.blocksize[1]))
+        if not (k in self.blocks):
+            self.blocks[k] = numpy.zeros(self.blocksize,dtype=self.dtype)
+        k2 = (int(key[0]%self.blocksize[0]),int(key[1]%self.blocksize[1]))
+        self.blocks[k][k2] = item
 
 class GridMap:
     """
@@ -67,7 +86,7 @@ class GridMap:
     """
     
     def __init__(self,size=(100000,100000)):
-        self._map = scipy.sparse.dok_matrix((100000,100000),dtype=numpy.float32)
+        self._map = BlockSparseMatrix() #((100000,100000),dtype=numpy.float32)
     
     def update(self,position,distance,sensorangle,sensor):
         """
@@ -152,17 +171,25 @@ if __name__ == '__main__':
     """
     Do validation test
     """
-    import time
+    import time,os
+    from matplotlib import pyplot
+    makevideo = False
+    #set up the map and scale
     scale = 100.0
-    groundtruth = ((1,1,1,1,1),(1,0,0,0,1),(1,0,1,0,1),(1,0,0,0,1),(1,1,1,1,1))
+    groundtruth = ((1,1,1,1,1),
+                   (1,0,0,0,1),
+                   (1,0,1,0,1),
+                   (1,0,0,0,1),
+                   (1,1,1,1,1))
     estmap = GridMap()
     
+    #this is the set of positions the rover moves between
     tour = ((150.0,150.0,0.0),(350.0,150.0,0.0),
             (350.0,150.0,-numpy.pi/2.0),(350.0,350.0,-numpy.pi/2.0),
             (350.0,350.0,-numpy.pi),(150.0,350.0,-numpy.pi),
             (150.0,350.0,-numpy.pi*1.5),(150.0,150.0,-numpy.pi*1.5),(150.0,150.0,-numpy.pi*2))
     
-    divs =200
+    divs =100
     vals = []
     for i in xrange(len(tour)-1):
         
@@ -196,10 +223,15 @@ if __name__ == '__main__':
                     t0 = time.time()
                     estmap.update(position,distance,sensorangle,sensor)
                     vals.append(time.time()-t0)
+            if makevideo:
+                fname = '_tmp%05d.png'%(i*divs+j)
+                print (i*divs+j)
+                pyplot.imsave(fname,numpy.clip(estmap.getRange((90,90),(410,410)),-20.,100.))
+                pyplot.clf()
                     
     print "Mean Sensor Update Time:", numpy.mean(vals)
-    #from matplotlib import pyplot
-    #pyplot.imshow(numpy.clip(estmap.getRange((90,90),(410,410)),-20.,100.))
     
-    
+    if makevideo:
+        os.system("mencoder 'mf://*.png' -mf type=png:fps=30 -ovc lavc -lavcopts vcodec=wmv2 -oac copy -o rovertest.avi")
+        os.system("rm -f _tmp*.png")
     
