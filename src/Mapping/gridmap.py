@@ -4,59 +4,11 @@ Created on Sat May 16 20:47:27 2015
 
 @author: merlz
 """
-import numpy
+import numpy,random
+from BresenhamAlgorithms import BresenhamLine,BresenhamTriangle
 
 #ranges all given in cm
 SonarSensor = {"spread": 15.*numpy.pi/180., "range": 500., "phitfree": -0.2, "phitoccupied": 3.5}
-
-
-def BresenhamLine(A,B):
-    if A[0] == B[0]:
-        if B[1] >= A[1]:
-            return [(A[0],i) for i in xrange(A[1],B[1]+1,1)]
-        else:
-            return [(A[0],i) for i in xrange(A[1],B[1]-1,-1)]
-    flipped = False
-    if (A[0] > B[0]):
-        flipped = True
-        tmp = B
-        B = A
-        A = tmp
-    result = []
-    inc = numpy.sign(B[1]-A[1])
-    error = 0
-    yval = A[1]
-    slope = A-B
-    slope = abs(slope[1]/float(slope[0]))
-    for i in xrange(A[0],B[0]+1):
-        result.append((i,yval))
-        error += slope
-        while error >= 0.5:
-            yval += inc
-            error -= 1.0
-            result.append((i,yval))
-    if flipped:
-        result = result[::-1]
-    return result
-
-#Unlike the line, this does only one pixel per Y row, so it can be used in fill algorithms efficiently
-def BresenhamBorder(A,B):
-    flipped = False
-    if (A[1] > B[1]):
-        flipped = True
-        tmp = B
-        B = A
-        A = tmp
-    result = []
-    xval = A[0]
-    slope = A-B
-    slope = slope[0]/float(slope[1]+0.000000001)
-    for i in xrange(A[1],B[1]+1):
-        result.append((int(numpy.round(xval)),i))
-        xval += slope
-    if flipped:
-        result = result[::-1]
-    return result
 
 class BlockSparseMatrix:
     
@@ -80,88 +32,132 @@ class BlockSparseMatrix:
         k2 = (int(key[0]%self.blocksize[0]),int(key[1]%self.blocksize[1]))
         self.blocks[k][k2] = item
 
+class FBMatrix:
+    
+    def __init__(self,order = 15,dtype=numpy.float32):
+        self.ordvals = numpy.arange(0.,order+1.,1.).reshape((-1,1))
+        self.scales = 1./numpy.array([max(item**2+sublist**2,1.)**0.5 for sublist in xrange(0,order+1) for item in xrange(0,order+1)])
+        self.coeffs = numpy.zeros((order+1)**2,dtype=numpy.float64)
+        self.dp = numpy.ones(self.ordvals.shape[0]).reshape((1,-1))
+        self.coeff0 = (numpy.pi) * (1./5000.) #500 is the longest wave we represent
+        #self.scales /= numpy.sum(self.scales)
+        #this is an optimisation
+        #self.ordvals *= self.coeff0
+        self.mom = 0.0
+    
+    def __getitem__(self, key):
+        x0 = numpy.dot(self.ordvals*key[0],self.dp)
+        y0 = numpy.dot(self.ordvals*key[1],self.dp).T
+        vals = numpy.cos((x0+y0)*self.coeff0).ravel()
+        vals[0] = 0.
+        return numpy.dot(self.coeffs,vals)
+        
+    
+    def __setitem__(self, key, item):
+        x0 = numpy.dot(self.ordvals*key[0],self.dp)
+        y0 = numpy.dot(self.ordvals*key[1],self.dp).T
+        vals = numpy.cos((x0+y0)*self.coeff0).ravel()
+        vals[0] = 0.
+        #print vals
+        error = item - numpy.dot(self.coeffs,vals)
+        #print item,numpy.dot(self.coeffs,vals),error
+        error = 0.2 * error * self.scales * vals #/ numpy.sum(vals*self.scales)
+        #print error
+        #print error
+        #print vals
+        self.coeffs += error #/numpy.sum(error)
+        
+
+class ApproxMatrix:
+    
+    def __init__(self,dbsize=(4,512),dtype=numpy.float32):
+        self.map = numpy.zeros(dbsize,dtype)
+        self.offsets = numpy.square(numpy.array(range(1,2*dbsize[0]+1,2),dtype=numpy.uint32))
+        self.coords1 = numpy.array(range(dbsize[0]))
+    
+    def __getitem__(self, key):
+        random.seed((numpy.left_shift(numpy.int64(numpy.int32(key[0])),32) + numpy.int64(numpy.int32(key[1]))))
+        k2 = numpy.array([random.randint(0,self.map.shape[1]-1) for i in xrange(self.map.shape[0])])
+        return numpy.mean(self.map[self.coords1,k2])
+    
+    def __setitem__(self, key, item):
+        random.seed((numpy.left_shift(numpy.int64(numpy.int32(key[0])),32) + numpy.int64(numpy.int32(key[1]))))
+        k2 = numpy.array([random.randint(0,self.map.shape[1]-1) for i in xrange(self.map.shape[0])])
+        self.map[self.coords1,k2] += item - numpy.mean(self.map[self.coords1,k2])
+
+
 class GridMap:
     """
-    Generic sparse gridmap.
+    Sparse gridmap for 2D mapping.
     """
     
-    def __init__(self,size=(100000,100000)):
-        self._map = BlockSparseMatrix() #((100000,100000),dtype=numpy.float32)
+    def __init__(self,scale=0.5):
+        """
+        @brief Initialise a sparse block grid-map with arc-based sensor updates.
+        
+        @param scale The multiplier to rescale from input units to map cell size.
+        """
+        self._scale = scale
+        self._map = BlockSparseMatrix()
     
     def update(self,position,distance,sensorangle,sensor):
         """
-        Position is given as (x,y,theta); the sensor field is filled by one of the defines in this file, or similar
+        @brief Update the map with a sensor reading.
+        
+        @param position The robot's current position given as (x,y,theta) for hte robot's position and angle.
+        @param distance The distance measurement from the sensor.
+        @param sensorangle The current angle from the robot's forward direction to the sensor.
+        @param sensor A dict holding sensor-specific hardware data (see SonarSensor in this file).
         """
+        
         thetamax = position[2] + sensor["spread"]/2. + sensorangle
         thetamin = position[2] - sensor["spread"]/2. + sensorangle
         
-        #for efficiency, we assume that the object is a straight line, and the area is a triangle
-        A = numpy.array(position[:2])
-        B = numpy.round(numpy.array([numpy.cos(thetamax),numpy.sin(thetamax)])*distance + A).astype(numpy.int32)
-        C = numpy.round(numpy.array([numpy.cos(thetamin),numpy.sin(thetamin)])*distance + A).astype(numpy.int32)
-        A = numpy.round(A).astype(numpy.int32)
-        coords = [A,B,C]
+        #for efficiency, we assume that the arc is a straight line, and the area is a triangle
+        A = numpy.array(position[:2])*self._scale
+        B = numpy.round(numpy.array([numpy.cos(thetamax),numpy.sin(thetamax)])*distance + A).astype(numpy.int64)
+        C = numpy.round(numpy.array([numpy.cos(thetamin),numpy.sin(thetamin)])*distance + A).astype(numpy.int64)
+        A = numpy.round(A).astype(numpy.int64)
         
-        #DO FILL OVER THE TRIANGLE ABC
-        #1. sort in Y
-        if A[1] < B[1]:
-            tmp = A
-            A = B
-            B = tmp
-        if A[1] < C[1]:
-            tmp = A
-            A = C
-            C = tmp
-        if B[1] < C[1]:
-            tmp = C
-            C = B
-            B = tmp
-        
-        #2. generate borders
+        #FILL THE EMPTY ARC OF THE SENSOR (as an approximate triangle)
         emptyVal = sensor["phitfree"]
-        if A[0] == B[0]:
-            beginX = BresenhamBorder(A,C)
-            endX = BresenhamBorder(B,C)
-        else:
-            beginX = BresenhamBorder(A,B)
-            endX = BresenhamBorder(A,C)
-            if len(beginX) < len(endX):
-                beginX += BresenhamBorder(B,C)[1:]
-            elif len(endX) < len(beginX):
-                endX += BresenhamBorder(C,B)[1:]
-        #3. fill the triangle
-        for i in xrange(len(beginX)):
-            if endX[i][0] >= beginX[i][0]:
-                for j in xrange(beginX[i][0],endX[i][0]+1,1):
-                    self._map[j,beginX[i][1]] += emptyVal
-            else:
-                for j in xrange(beginX[i][0],endX[i][0]-1,-1):
-                    self._map[j,beginX[i][1]] += emptyVal
-                
+        for cell in BresenhamTriangle(A,B,C):
+            self._map[cell[0],cell[1]] = max(emptyVal+self._map[cell[0],cell[1]],-20.)
         
         #DO BRESENHAM from B to C for hit objects
-        A,B,C = coords
         hitVals = BresenhamLine(B,C)
         solidVal = sensor["phitoccupied"]
         for h in hitVals:
-            self._map[h[0],h[1]] += solidVal
+            self._map[h[0],h[1]] = min(solidVal+self._map[h[0],h[1]],120.)
         
     
     def get(self,location):
         """
-        Locations are [x,y]
+        @brief Get the value at a certain x,y location.
+        
+        @param location A location in the form [x,y]
         """
-        location = numpy.round(location).astype(numpy.int32)
+        location = numpy.round(location).astype(numpy.int64)
         return self._map(location[0],location[1])
     
     def getRange(self,topleft,bottomright):
         """
-        Locations are [x,y]
+        @brief Get the values for a range of locations as a matrix.
+        
+        @param topleft A location in the form [x,y] designating the top left of the area
+        @param bottomright A location in the form [x,y] designating the bottom right of the area
         """
+        #convert into map scale
+        topleft = numpy.round(numpy.array(topleft)*self._scale).astype(numpy.int64)
+        bottomright = numpy.round(numpy.array(bottomright)*self._scale).astype(numpy.int64)
+        
+        #fill in the output
         result = numpy.zeros((bottomright[0]-topleft[0],bottomright[1]-topleft[1]))
         for i in xrange(topleft[0],bottomright[0]):
+            ival = numpy.round(i*self._scale).astype(numpy.int64)
             for j in xrange(topleft[1],bottomright[1]):
-                result[i-topleft[0],j-topleft[1]] = self._map[i,j]
+                jval = numpy.round(j*self._scale).astype(numpy.int64)
+                result[i-topleft[0],j-topleft[1]] = self._map[ival,jval]
         return result
 
 
@@ -173,7 +169,10 @@ if __name__ == '__main__':
     """
     import time,os
     from matplotlib import pyplot
-    makevideo = False
+    
+    #set this true and have mencoder to create a video of the test
+    makevideo = True
+    
     #set up the map and scale
     scale = 100.0
     groundtruth = ((1,1,1,1,1),
@@ -181,14 +180,17 @@ if __name__ == '__main__':
                    (1,0,1,0,1),
                    (1,0,0,0,1),
                    (1,1,1,1,1))
-    estmap = GridMap()
+    
+    #set up the grid map on a 2cm scale (half the input resolution)
+    estmap = GridMap(scale=0.5)
     
     #this is the set of positions the rover moves between
     tour = ((150.0,150.0,0.0),(350.0,150.0,0.0),
-            (350.0,150.0,-numpy.pi/2.0),(350.0,350.0,-numpy.pi/2.0),
-            (350.0,350.0,-numpy.pi),(150.0,350.0,-numpy.pi),
-            (150.0,350.0,-numpy.pi*1.5),(150.0,150.0,-numpy.pi*1.5),(150.0,150.0,-numpy.pi*2))
+            (350.0,150.0,numpy.pi/2.0),(350.0,350.0,numpy.pi/2.0),
+            (350.0,350.0,numpy.pi),(150.0,350.0,numpy.pi),
+            (150.0,350.0,numpy.pi*1.5),(150.0,150.0,numpy.pi*1.5),(150.0,150.0,numpy.pi*2))
     
+    #this is the number of steps along each part of the tour
     divs =100
     vals = []
     for i in xrange(len(tour)-1):
@@ -196,9 +198,10 @@ if __name__ == '__main__':
         
         for j in xrange(divs):
             position = numpy.array(tour[i])*(1.-j/float(divs))+numpy.array(tour[(i+1)%len(tour)])*(j/float(divs))
-            #position[2] += numpy.sin(j/10.)
-            #get range
+            
             for k in xrange(4):
+                
+                #simulate each of the sonar sensor sweeps and see if we hit anything.
                 sensor = SonarSensor
                 sensorangle = numpy.pi/2*k
                 thetamax = position[2] + sensor["spread"]/2. + sensorangle
@@ -212,6 +215,7 @@ if __name__ == '__main__':
                     
                     for pos in BresenhamLine(B,C):
                         if groundtruth[int((pos[0]/scale))][int((pos[1]/scale))] == 1:
+                            distance = numpy.linalg.norm(position - pos)
                             hit = True
                             break
                     if hit:
@@ -223,15 +227,15 @@ if __name__ == '__main__':
                     t0 = time.time()
                     estmap.update(position,distance,sensorangle,sensor)
                     vals.append(time.time()-t0)
-            if makevideo:
+            if makevideo: #save out png's for the video
                 fname = '_tmp%05d.png'%(i*divs+j)
                 print (i*divs+j)
-                pyplot.imsave(fname,numpy.clip(estmap.getRange((90,90),(410,410)),-20.,100.))
+                pyplot.imsave(fname,numpy.clip(estmap.getRange((95,95),(405,405)), -1000,1000 ))
                 pyplot.clf()
                     
     print "Mean Sensor Update Time:", numpy.mean(vals)
     
-    if makevideo:
+    if makevideo: #convert png's to video
         os.system("mencoder 'mf://*.png' -mf type=png:fps=30 -ovc lavc -lavcopts vcodec=wmv2 -oac copy -o rovertest.avi")
         os.system("rm -f _tmp*.png")
     
