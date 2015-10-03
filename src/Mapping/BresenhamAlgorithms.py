@@ -59,37 +59,39 @@ def BresenhamBorder(A,B):
         xvals = numpy.round(A[0] + slope*numpy.arange(0.,abs(A[1]-B[1])+1,1.)).astype(numpy.int32)
         return [(xvals[i], y) for i,y in enumerate(xrange(A[1],B[1]+incrementy,incrementy))]
 
-def BresenhamTriangle(A,B,C):
+def BresenhamPolygon(vertices):
+    #put the largest value at the head of the list:
+    maxvert = 0
+    for i in xrange(len(vertices)):
+        if vertices[i][1] > vertices[maxvert][1]:
+            maxvert = i
     
-    #sort the vertices to start at the largest Y value
-    if B[1] < C[1]:
-        tmp = B
-        B = C
-        C = tmp
-    if A[1] < B[1]:
-        tmp = A
-        A = B
-        B = tmp
-    if B[1] < C[1]:
-        tmp = B
-        B = C
-        C = tmp
+    vertices = vertices[maxvert:] + vertices[:maxvert]
+    #split the list in to two sides based on max->min paths
+    minvert = 0
+    for i in xrange(len(vertices)):
+        if vertices[i][1] < vertices[minvert][1]:
+            minvert = i
+    #skip everything of equal Y height on the top
+    start = 0
+    while start < len(vertices)-2 and vertices[start][1] == vertices[start+1][1]:
+        start += 1
+    side1 = vertices[start:minvert+1]
+    #create the "left" border
+    l = BresenhamBorder(side1[0],side1[1])
+    for i in xrange(1,len(side1)-1):
+        l += BresenhamBorder(side1[i],side1[i+1])[1:]
     
-    # Generate the start and end points for horizontal scans
-    if A[1] == B[1]:
-        l = BresenhamBorder(A,C)
-        r = BresenhamBorder(B,C)
-    else:
-        l = BresenhamBorder(A,B)
-        r = BresenhamBorder(A,C)
-        
-        if len(l) != len(r):
-            if len(l) > len(r):
-                r += BresenhamBorder(C,B)[1:]
-            elif len(r) > len(l):
-                l += BresenhamBorder(B,C)[1:]
-            if len(l) > len(r):
-                r += BresenhamBorder(C,B)[1:]
+    #skip everything of equal Y height on the bottom
+    while minvert < len(vertices)-2 and vertices[minvert][1] == vertices[minvert+1][1]:
+        minvert += 1
+    side2 = vertices[minvert:]
+    side2.reverse()
+    side2 = [vertices[0]] + side2
+    #create the "right" border
+    r = BresenhamBorder(side2[0],side2[1])
+    for i in xrange(1,len(side2)-1):
+        r += BresenhamBorder(side2[i],side2[i+1])[1:]
     
     #do horizontal scans and save all the cell locations in the triangle
     result = []
@@ -97,3 +99,7 @@ def BresenhamTriangle(A,B,C):
         increment = 1 if r[i][0] >= l[i][0] else -1 
         result += [(j,l[i][1]) for j in xrange(l[i][0],r[i][0]+increment,increment)]
     return result
+
+def BresenhamTriangle(A,B,C):
+    #this is here because not all the functions have been upgraded to polygon yet
+    return BresenhamPolygon([A,B,C])
